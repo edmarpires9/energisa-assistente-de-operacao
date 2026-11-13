@@ -35,6 +35,7 @@ type Person = {
   last_name: string
   phone1: string | null
   phone2: string | null
+  extension: string | null
   company: string
   created_by_name: string
   created_at: string
@@ -54,6 +55,7 @@ type PersonForm = {
   last_name: string
   phone1: string
   phone2: string
+  extension: string
   company: string
 }
 
@@ -65,6 +67,7 @@ const EMPTY_FORM: PersonForm = {
   last_name: "",
   phone1: "",
   phone2: "",
+  extension: "",
   company: "",
 }
 
@@ -86,6 +89,8 @@ function isPerson(value: unknown): value is Person {
     (typeof value.phone1 === "string" || value.phone1 === null) &&
     "phone2" in value &&
     (typeof value.phone2 === "string" || value.phone2 === null) &&
+    "extension" in value &&
+    (typeof value.extension === "string" || value.extension === null) &&
     "company" in value &&
     typeof value.company === "string" &&
     "created_by_name" in value &&
@@ -110,6 +115,20 @@ function isPeopleResponse(value: unknown): value is { people: Person[] } {
   }
 
   return value.people.every(isPerson)
+}
+
+function getDuplicatePeople(value: unknown): Person[] | null {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    !("duplicates" in value) ||
+    !Array.isArray(value.duplicates) ||
+    !value.duplicates.every(isPerson)
+  ) {
+    return null
+  }
+
+  return value.duplicates
 }
 
 function isCompany(value: unknown): value is Company {
@@ -162,6 +181,30 @@ function formatPhone(phone: string) {
   }
 
   return phone
+}
+
+function formatPhoneInput(value: string) {
+  const rawDigits = value.replace(/\D/g, "")
+  const nationalDigits =
+    rawDigits.length > 11 && rawDigits.startsWith("55")
+      ? rawDigits.slice(2)
+      : rawDigits
+  const digits = nationalDigits.slice(0, 11)
+  if (!digits) {
+    return ""
+  }
+
+  const areaCode = digits.slice(0, 2)
+  const subscriber = digits.slice(2)
+  if (digits.length <= 2) {
+    return `(${areaCode}`
+  }
+  if (digits.length <= 6) {
+    return `(${areaCode}) ${subscriber}`
+  }
+
+  const subscriberPrefixLength = digits.length > 10 ? 5 : 4
+  return `(${areaCode}) ${subscriber.slice(0, subscriberPrefixLength)}-${subscriber.slice(subscriberPrefixLength)}`
 }
 
 function getPhoneHref(phone: string) {
@@ -221,6 +264,7 @@ export function PeopleDirectory() {
   const [error, setError] = useState("")
   const [companyLoadError, setCompanyLoadError] = useState("")
   const [mutationError, setMutationError] = useState("")
+  const [duplicatePeople, setDuplicatePeople] = useState<Person[]>([])
   const [isSheetOpen, setIsSheetOpen] = useState(false)
   const [editingPerson, setEditingPerson] = useState<Person | null>(null)
   const [form, setForm] = useState<PersonForm>(EMPTY_FORM)
@@ -349,6 +393,7 @@ export function PeopleDirectory() {
     setCompanySearch("")
     setCompanyCreateError("")
     setMutationError("")
+    setDuplicatePeople([])
     setIsSheetOpen(true)
   }
 
@@ -362,14 +407,16 @@ export function PeopleDirectory() {
     setForm({
       first_name: person.first_name,
       last_name: person.last_name,
-      phone1: person.phone1 ?? "",
-      phone2: person.phone2 ?? "",
+      phone1: formatPhoneInput(person.phone1 ?? ""),
+      phone2: formatPhoneInput(person.phone2 ?? ""),
+      extension: person.extension ?? "",
       company: person.company,
     })
     setCompanySelection(savedCompany?.id ?? CURRENT_COMPANY)
     setCompanySearch(savedCompany?.name ?? "")
     setCompanyCreateError("")
     setMutationError("")
+    setDuplicatePeople([])
     setIsSheetOpen(true)
   }
 
@@ -429,6 +476,7 @@ export function PeopleDirectory() {
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setMutationError("")
+    setDuplicatePeople([])
     if (
       !companies.some((company) => company.id === companySelection) &&
       companySelection !== CURRENT_COMPANY
@@ -454,6 +502,17 @@ export function PeopleDirectory() {
       const payload: unknown = await response.json()
 
       if (!response.ok) {
+        if (!editingPerson && response.status === 409) {
+          const duplicates = getDuplicatePeople(payload)
+          if (duplicates) {
+            setDuplicatePeople(duplicates)
+            setMutationError(
+              getErrorMessage(payload, "Este contato já está cadastrado.")
+            )
+            return
+          }
+        }
+
         throw new Error(
           getErrorMessage(
             payload,
@@ -777,6 +836,11 @@ export function PeopleDirectory() {
                             {formatPhone(phone)}
                           </a>
                         ))}
+                      {person.extension && (
+                        <span className="text-xs text-muted-foreground">
+                          Ramal: {person.extension}
+                        </span>
+                      )}
                     </div>
                     <div className="pl-[3.25rem] text-xs text-muted-foreground md:pl-0">
                       <p>Cadastrado por: {person.created_by_name}</p>
@@ -836,7 +900,7 @@ export function PeopleDirectory() {
             className="flex flex-col gap-5 px-6 pb-6"
             onSubmit={handleSubmit}
           >
-            <Field>
+            <Field className="gap-1">
               <FieldLabel htmlFor="person-first-name">Nome</FieldLabel>
               <Input
                 id="person-first-name"
@@ -849,7 +913,7 @@ export function PeopleDirectory() {
                 required
               />
             </Field>
-            <Field>
+            <Field className="gap-1">
               <FieldLabel htmlFor="person-last-name">Sobrenome</FieldLabel>
               <Input
                 id="person-last-name"
@@ -862,7 +926,7 @@ export function PeopleDirectory() {
                 required
               />
             </Field>
-            <Field>
+            <Field className="gap-1">
               <FieldLabel htmlFor="person-phone1">Telefone 1</FieldLabel>
               <Input
                 id="person-phone1"
@@ -870,15 +934,19 @@ export function PeopleDirectory() {
                 type="tel"
                 inputMode="tel"
                 autoComplete="tel"
-                placeholder="(11) 99999-9999"
+                maxLength={15}
+                placeholder="(11) 91234-5678"
                 value={form.phone1}
                 onChange={(event) =>
-                  setForm({ ...form, phone1: event.target.value })
+                  setForm({
+                    ...form,
+                    phone1: formatPhoneInput(event.target.value),
+                  })
                 }
                 required={!editingPerson?.auth_user_id}
               />
             </Field>
-            <Field>
+            <Field className="gap-1">
               <FieldLabel htmlFor="person-phone2">
                 Telefone 2 (opcional)
               </FieldLabel>
@@ -887,27 +955,53 @@ export function PeopleDirectory() {
                 name="phone2"
                 type="tel"
                 inputMode="tel"
-                placeholder="(11) 3333-3333"
+                maxLength={15}
+                placeholder="(11) 91234-5678"
                 value={form.phone2}
                 onChange={(event) =>
-                  setForm({ ...form, phone2: event.target.value })
+                  setForm({
+                    ...form,
+                    phone2: formatPhoneInput(event.target.value),
+                  })
                 }
               />
             </Field>
-            <fieldset className="flex flex-col gap-3">
-              <legend className="text-sm leading-none font-medium">
-                Empresa
-              </legend>
+            <Field className="gap-1">
+              <FieldLabel htmlFor="person-extension">
+                Ramal (opcional)
+              </FieldLabel>
               <Input
-                type="search"
-                aria-label="Buscar empresa"
-                placeholder="Buscar empresa"
-                value={companySearch}
-                onChange={(event) => {
-                  setCompanySearch(event.target.value)
-                  setCompanyCreateError("")
-                }}
+                id="person-extension"
+                name="extension"
+                value={form.extension ?? ""}
+                onChange={(event) =>
+                  setForm({ ...form, extension: event.target.value })
+                }
               />
+            </Field>
+            <div
+              role="group"
+              aria-labelledby="person-company-label"
+              className="flex flex-col gap-3"
+            >
+              <div className="flex flex-col gap-1">
+                <p
+                  id="person-company-label"
+                  className="text-sm leading-none font-medium"
+                >
+                  Empresa
+                </p>
+                <Input
+                  type="search"
+                  aria-label="Buscar empresa"
+                  placeholder="Buscar empresa"
+                  value={companySearch}
+                  onChange={(event) => {
+                    setCompanySearch(event.target.value)
+                    setCompanyCreateError("")
+                  }}
+                />
+              </div>
               <div className="max-h-40 overflow-y-auto rounded-md border p-3">
                 <div className="flex flex-col gap-3">
                   {showLegacyCompany && (
@@ -980,11 +1074,32 @@ export function PeopleDirectory() {
               >
                 Gerenciar empresas cadastradas
               </Link>
-            </fieldset>
+            </div>
             {mutationError && (
               <p role="alert" className="text-sm text-destructive">
                 {mutationError}
               </p>
+            )}
+            {duplicatePeople.length > 0 && (
+              <div
+                className="flex flex-col gap-2"
+                aria-label="Contatos existentes"
+              >
+                <p className="text-sm">
+                  Selecione um contato para abrir e atualizar:
+                </p>
+                {duplicatePeople.map((person) => (
+                  <Button
+                    key={person.id}
+                    type="button"
+                    variant="outline"
+                    onClick={() => openEditForm(person)}
+                  >
+                    Atualizar {person.first_name} {person.last_name}
+                    {person.phone1 ? ` · ${formatPhone(person.phone1)}` : ""}
+                  </Button>
+                ))}
+              </div>
             )}
             <Button type="submit" disabled={isSaving}>
               {isSaving

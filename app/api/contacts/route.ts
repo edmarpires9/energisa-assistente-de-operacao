@@ -8,14 +8,15 @@ type PersonInput = {
   last_name: string
   phone1: string | null
   phone2: string | null
+  extension: string | null
   company: string
 }
 
 const PERSON_FIELDS =
-  "id, auth_user_id, first_name, last_name, phone1, phone2, company:contractor, created_by_name, created_at, updated_by_name, updated_at"
+  "id, auth_user_id, first_name, last_name, phone1, phone2, extension, company:contractor, created_by_name, created_at, updated_by_name, updated_at"
 
 const MIGRATIONS_REQUIRED_MESSAGE =
-  "O banco ainda não está configurado para contatos. Execute as migrations 20261108000000_create_shared_people.sql e 20261108000100_link_users_to_people.sql, nessa ordem, no SQL Editor do Supabase."
+  "O banco ainda não está configurado para contatos. Execute as migrations 20261108000000_create_shared_people.sql, 20261108000100_link_users_to_people.sql e 20261113000000_add_people_extension.sql, nessa ordem, no SQL Editor do Supabase."
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -52,6 +53,17 @@ function normalizePhone(value: unknown, optional: boolean) {
   return /^\d{10,13}$/.test(digits) ? digits : null
 }
 
+function getComparablePhone(value: string | null) {
+  const digits = value?.replace(/\D/g, "") ?? ""
+  return digits.length > 11 && digits.startsWith("55")
+    ? digits.slice(2)
+    : digits
+}
+
+function escapeLikePattern(value: string) {
+  return value.replace(/[\\%_*]/g, "\\$&")
+}
+
 function getProfilePhoneFields(phone: string | null, suffix: "" | "2") {
   const digits = phone ?? ""
   const national =
@@ -78,6 +90,12 @@ function parsePersonInput(
   const company = typeof value.company === "string" ? value.company.trim() : ""
   const phone1 = normalizePhone(value.phone1 ?? "", allowMissingPhone)
   const phone2 = normalizePhone(value.phone2 ?? "", true)
+  const extension =
+    value.extension == null
+      ? ""
+      : typeof value.extension === "string"
+        ? value.extension.trim()
+        : null
 
   if (
     !firstName ||
@@ -85,7 +103,8 @@ function parsePersonInput(
     !company ||
     phone1 === null ||
     (!allowMissingPhone && phone1 === "") ||
-    phone2 === null
+    phone2 === null ||
+    extension === null
   ) {
     return null
   }
@@ -95,6 +114,7 @@ function parsePersonInput(
     last_name: lastName,
     phone1: phone1 || null,
     phone2: phone2 || null,
+    extension: extension || null,
     company,
   }
 }
@@ -177,11 +197,88 @@ export async function POST(request: Request) {
     )
   }
 
+  const inputPhones = new Set(
+    [input.phone1, input.phone2]
+      .map(getComparablePhone)
+      .filter((phone) => phone.length > 0)
+  )
+  const phoneSearchValues = new Set<string>()
+  for (const phone of inputPhones) {
+    phoneSearchValues.add(phone)
+    if (phone.length === 10 || phone.length === 11) {
+      phoneSearchValues.add(`55${phone}`)
+    }
+  }
+
+  const phoneFilters = [...phoneSearchValues].flatMap((phone) => [
+    `phone1.eq.${phone}`,
+    `phone2.eq.${phone}`,
+  ])
+  const [nameMatches, phoneMatches] = await Promise.all([
+    supabase
+      .from("people")
+      .select(PERSON_FIELDS)
+      .ilike("first_name", escapeLikePattern(input.first_name))
+      .ilike("last_name", escapeLikePattern(input.last_name)),
+    supabase.from("people").select(PERSON_FIELDS).or(phoneFilters.join(",")),
+  ])
+
+  const checkError = nameMatches.error ?? phoneMatches.error
+  if (checkError) {
+    console.error("Failed to check for duplicate shared people:", checkError)
+    return NextResponse.json(
+      {
+        error: isPeopleSchemaError(checkError)
+          ? MIGRATIONS_REQUIRED_MESSAGE
+          : "Não foi possível verificar se o contato já existe.",
+      },
+      { status: isPeopleSchemaError(checkError) ? 503 : 500 }
+    )
+  }
+
+  const normalizedFirstName = input.first_name.toLocaleLowerCase("pt-BR")
+  const normalizedLastName = input.last_name.toLocaleLowerCase("pt-BR")
+  const duplicatePeople = new Map<
+    string,
+    NonNullable<typeof nameMatches.data>[number]
+  >()
+  for (const person of [
+    ...(nameMatches.data ?? []),
+    ...(phoneMatches.data ?? []),
+  ]) {
+    const hasSameName =
+      person.first_name.trim().toLocaleLowerCase("pt-BR") ===
+        normalizedFirstName &&
+      person.last_name.trim().toLocaleLowerCase("pt-BR") === normalizedLastName
+    const hasSamePhone = [person.phone1, person.phone2].some((phone) =>
+      inputPhones.has(getComparablePhone(phone))
+    )
+
+    if (hasSameName || hasSamePhone) {
+      duplicatePeople.set(person.id, person)
+    }
+  }
+
+  if (duplicatePeople.size > 0) {
+    return NextResponse.json(
+      {
+        error:
+          "Já existe um contato com esse nome ou telefone. Selecione abaixo para atualizá-lo.",
+        duplicates: [...duplicatePeople.values()],
+      },
+      { status: 409 }
+    )
+  }
+
   const { data, error } = await supabase
     .from("people")
     .insert({
-      ...input,
-      company: input.company,
+      first_name: input.first_name,
+      last_name: input.last_name,
+      phone1: input.phone1,
+      phone2: input.phone2,
+      extension: input.extension,
+      contractor: input.company,
     })
     .select(PERSON_FIELDS)
     .single()
@@ -308,6 +405,7 @@ export async function PATCH(request: Request) {
       last_name: input.last_name,
       phone1: input.phone1,
       phone2: input.phone2,
+      extension: input.extension,
       contractor: input.company,
     })
     .eq("id", body.id)
